@@ -1,0 +1,5 @@
+API_Key.env
+__pycache__/
+*.pyc
+.vscode/
+greenbyte_backfi*l/
