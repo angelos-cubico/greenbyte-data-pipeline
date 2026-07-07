@@ -6,6 +6,12 @@ from datetime import date
 from dotenv import load_dotenv
 import os
 from pathlib import Path
+import truststore
+truststore.inject_into_ssl()
+from azure.storage.blob import BlobServiceClient
+from dotenv import load_dotenv
+import os
+
 
 
 # --------------------------------------------------
@@ -22,6 +28,8 @@ urllib3.disable_warnings(
 env_path = Path(__file__).parent / "API_key.env"
 
 load_dotenv(env_path)
+env_path = Path(__file__).parent / "API_key.env"
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 
 API_KEY = os.getenv("GREENBYTE_API_KEY")
 
@@ -185,7 +193,6 @@ def signals_json_to_dataframe(data):
 
     return df
 
-
 # --------------------------------------------------
 # SAVE MONTHLY FILE
 # --------------------------------------------------
@@ -207,14 +214,31 @@ def save_month_file(df, month_start):
     file_path = folder / f"{ASSET_NAME}_signals_{year}_{month:02d}_10minute.parquet"
 
     df.to_parquet(
-    file_path,
-    index=False
-)
+        file_path,
+        index=False
+    )
 
     print("Saved:", file_path)
     print("Rows:", len(df))
 
+    blob_service = BlobServiceClient.from_connection_string(
+        AZURE_STORAGE_CONNECTION_STRING
+    )
 
+    blob_name = (
+        f"asset={ASSET_NAME}/"
+        f"year={year}/"
+        f"month={month:02d}/"
+        f"{os.path.basename(file_path)}"
+    )
+
+    with open(file_path, "rb") as data:
+        blob_service.get_blob_client(
+            container="signals",
+            blob=blob_name
+        ).upload_blob(data, overwrite=True)
+
+    print(f"Uploaded to Azure: {blob_name}")
 # --------------------------------------------------
 # MAIN SCRIPT
 # --------------------------------------------------
