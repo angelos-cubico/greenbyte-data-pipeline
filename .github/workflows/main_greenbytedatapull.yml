@@ -34,8 +34,12 @@ jobs:
           python -m venv venv
           source venv/bin/activate
 
+      
       - name: Install dependencies
-        run: pip install -r CubicoReports/requirements.txt
+        run: |
+          pip install -r CubicoReports/requirements.txt \
+          --target="./CubicoReports/.python_packages/lib/site-packages"
+
 
       # Optional: Add step to run tests here
 
