@@ -2,7 +2,7 @@ import azure.functions as func
 import logging
 
 from download_status_logs_incremental import main as status_main
-from download_signals_incremental_powerbi import main as signals_main
+from download_signals_incremental import main as signals_main
 
 
 app = func.FunctionApp()
