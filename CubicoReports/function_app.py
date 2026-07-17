@@ -4,7 +4,6 @@ import logging
 from download_status_logs_incremental import main as status_main
 from download_signals_incremental import main as signals_main
 
-
 app = func.FunctionApp()
 
 
@@ -19,24 +18,26 @@ def MonthlyReportingTrigger(myTimer: func.TimerRequest) -> None:
     if myTimer.past_due:
         logging.warning("Timer is past due")
 
-    logging.info("=" * 80)
-    logging.info("STARTING MONTHLY REPORTING PIPELINE")
-    logging.info("=" * 80)
+    logging.warning("=" * 80)
+    logging.warning("MONTHLY REPORTING PIPELINE START")
+    logging.warning("=" * 80)
 
     try:
-        logging.info("Running status logs pipeline...")
+
+        logging.warning("STATUS PIPELINE START")
         status_main()
+        logging.warning("STATUS PIPELINE END")
 
-        logging.info("Status logs finished successfully.")
-
-        logging.info("Running signals pipeline...")
+        logging.warning("SIGNALS PIPELINE START")
         signals_main()
+        logging.warning("SIGNALS PIPELINE END")
 
-        logging.info("Signals pipeline finished successfully.")
+        logging.warning("=" * 80)
+        logging.warning("MONTHLY REPORTING PIPELINE COMPLETE")
+        logging.warning("=" * 80)
 
-        logging.info("MONTHLY REPORTING PIPELINE COMPLETED")
+    except Exception:
 
-    except Exception as e:
+        logging.exception("MONTHLY REPORTING PIPELINE FAILED")
 
-        logging.exception("Monthly reporting pipeline failed")
         raise
