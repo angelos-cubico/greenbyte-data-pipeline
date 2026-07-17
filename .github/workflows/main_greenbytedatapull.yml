@@ -11,8 +11,8 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: '/CubicoReports' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.14' # set this to the python version to use (supports 3.6, 3.7, 3.8)
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: './CubicoReports'
+  PYTHON_VERSION: '3.11'
 
 jobs:
   build:
@@ -40,8 +40,9 @@ jobs:
       # Optional: Add step to run tests here
 
       - name: Zip artifact for deployment
-        run: cd CubicoReports
-              zip release.zip ./* -r
+        run: |
+          cd CubicoReports
+          zip -r ../release.zip .
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
