@@ -84,7 +84,7 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-DATA_SIGNAL_IDS = os.getenv("DATA_SIGNAL_IDS", "1,4,5,60,281,3192,430,445,446,5384,6951")
+DATA_SIGNAL_IDS = os.getenv("DATA_SIGNAL_IDS", "1,4,5,60,240,281,3192,430,445,446,5384,6792,6951,6957")
 
 START_YEAR = int(os.getenv("START_YEAR", "2026"))
 START_MONTH = int(os.getenv("START_MONTH", "1"))
