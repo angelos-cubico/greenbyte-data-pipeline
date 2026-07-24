@@ -54,3 +54,8 @@ AzuriteConfig
 API_key.env
 greenbyte_backfill/
 .vscode/
+
+appendix_output/*_power_curve_plot_cache/
+
+*.pdf
+*.*ng
