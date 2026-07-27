@@ -402,4 +402,72 @@ def main():
     print("="*80); print("DONE")
     if urls:
         print("Uploaded SharePoint URLs:"); [print(u) for u in urls]
+
+
+def run_appendices(year=None, month=None, asset="all", timestamp=None, upload_mode="graph"):
+    """
+    Azure Functions-safe wrapper around main().
+
+    This prevents argparse from reading Azure Functions worker command-line arguments.
+    It also lets function_app.py call the appendix generator directly.
+    """
+    import sys
+
+    old_argv = sys.argv[:]
+    new_argv = ["generate_appendices_common_graph.py", "--asset", str(asset), "--upload-mode", str(upload_mode)]
+
+    if year is not None:
+        new_argv.extend(["--year", str(year)])
+    if month is not None:
+        new_argv.extend(["--month", str(month)])
+    if timestamp is not None:
+        new_argv.extend(["--timestamp", str(timestamp)])
+
+    try:
+        sys.argv = new_argv
+        return main()
+    finally:
+        sys.argv = old_argv
+
+
+def run_appendices(
+    year=None,
+    month=None,
+    asset="all",
+    timestamp=None,
+    upload_mode="graph",
+):
+    """
+    Azure Functions-safe wrapper around main().
+
+    This prevents argparse from reading Azure Functions worker command-line arguments.
+    It lets function_app.py call the appendix generator directly.
+    """
+    import sys
+
+    old_argv = sys.argv[:]
+
+    new_argv = [
+        "generate_appendices_common_graph.py",
+        "--asset",
+        str(asset),
+        "--upload-mode",
+        str(upload_mode),
+    ]
+
+    if year is not None:
+        new_argv.extend(["--year", str(year)])
+
+    if month is not None:
+        new_argv.extend(["--month", str(month)])
+
+    if timestamp is not None:
+        new_argv.extend(["--timestamp", str(timestamp)])
+
+    try:
+        sys.argv = new_argv
+        return main()
+    finally:
+        sys.argv = old_argv
+
 if __name__=="__main__": main()

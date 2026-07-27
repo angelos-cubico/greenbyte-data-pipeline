@@ -35,3 +35,4 @@ typing_extensions==4.16.0
 tzdata==2025.3
 urllib3==2.6.3
 xyzservices==2025.11.0
+reportlab==4.4.4
