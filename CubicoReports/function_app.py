@@ -1,9 +1,11 @@
 import azure.functions as func
 import logging
 
+import download_dirtydozen_incremental
 from download_status_logs_incremental import main as status_main
 from download_signals_incremental import main as signals_main
 from generate_appendices_common_graph import main as appendices_main
+from download_dirtydozen_incremental import main as dirtydozen_main
 
 app = func.FunctionApp()
 
@@ -34,6 +36,9 @@ def DailyReportingDataPullTrigger(myTimer: func.TimerRequest) -> None:
         logging.warning("SIGNALS PIPELINE START")
         signals_main()
         logging.warning("SIGNALS PIPELINE END")
+        logging.warning("DIRTYDOZEN PIPELINE START")
+        dirtydozen_main()
+        logging.warning("DIRTYDOZEN PIPELINE END")
 
         logging.warning("=" * 80)
         logging.warning("DAILY GREENBYTE TO BLOB PIPELINE COMPLETE")
