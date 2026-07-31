@@ -1,12 +1,22 @@
 """
+download_status_logs_incremental.py
+
 Incremental Greenbyte status logs downloader.
 
 What this version does:
 1. Reads assets from assets.json.
 2. Checks Azure Blob Storage before downloading each monthly parquet.
 3. Skips historical months that already exist in Blob Storage.
-4. Refreshes the current month, because current-month status logs can still change.
-5. Saves a local parquet copy and uploads it to Azure Blob Storage.
+4. Always refreshes the current month, because current-month status logs can still change.
+5. Also refreshes the previous month during the first days of the new month,
+   so late Greenbyte status categorisation changes by site managers are picked up.
+6. Saves a local parquet copy and uploads it to Azure Blob Storage.
+
+Why previous-month refresh exists:
+- Site managers may update status categorisation/comments after month end.
+- Example: July event categorised on August 2.
+- If July parquet is skipped after August 1, the report will keep the old category.
+- This script refreshes previous month until PREVIOUS_MONTH_REFRESH_UNTIL_DAY.
 
 Expected local files:
 - API_key.env
@@ -21,8 +31,12 @@ STATUSLOGS_CONTAINER_NAME=statuslogs
 START_YEAR=2026
 START_MONTH=1
 PROCESS_ALL_ASSETS=true
+INCLUDE_CURRENT_MONTH=true
 OVERWRITE_CURRENT_MONTH=true
+REFRESH_PREVIOUS_MONTH=true
+PREVIOUS_MONTH_REFRESH_UNTIL_DAY=10
 PAGE_SIZE=50
+OUTPUT_FOLDER=greenbyte_backfill
 """
 
 import json
@@ -65,13 +79,9 @@ if not AZURE_STORAGE_CONNECTION_STRING:
 
 blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
 
-# Azure Blob container used by your previous script
 CONTAINER_NAME = os.getenv("STATUSLOGS_CONTAINER_NAME", "statuslogs")
-
-# Local output folder
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "greenbyte_backfill")
 
-# Status endpoint settings
 URL = "https://cubico.greenbyte.cloud/api/2/status"
 HEADERS = {
     "X-Api-Key": API_KEY,
@@ -82,10 +92,11 @@ START_YEAR = int(os.getenv("START_YEAR", "2026"))
 START_MONTH = int(os.getenv("START_MONTH", "1"))
 INCLUDE_CURRENT_MONTH = os.getenv("INCLUDE_CURRENT_MONTH", "true").lower() == "true"
 OVERWRITE_CURRENT_MONTH = os.getenv("OVERWRITE_CURRENT_MONTH", "true").lower() == "true"
+REFRESH_PREVIOUS_MONTH = os.getenv("REFRESH_PREVIOUS_MONTH", "true").lower() == "true"
+PREVIOUS_MONTH_REFRESH_UNTIL_DAY = int(os.getenv("PREVIOUS_MONTH_REFRESH_UNTIL_DAY", "10"))
 PROCESS_ALL_ASSETS = os.getenv("PROCESS_ALL_ASSETS", "true").lower() == "true"
 PAGE_SIZE = int(os.getenv("PAGE_SIZE", "50"))
 
-# Fallback if you want to run only one asset instead of assets.json
 DEFAULT_ASSET_NAME = os.getenv("ASSET_NAME", "Avloi")
 DEFAULT_DEVICE_IDS = os.getenv("DEVICE_IDS", "24710,24711,24712,24713")
 DEFAULT_LOST_PRODUCTION_SIGNAL_ID = os.getenv("LOST_PRODUCTION_SIGNAL_ID", "6951")
@@ -114,7 +125,7 @@ def load_assets():
 def asset_folder_name(asset):
     """Return a stable folder-safe asset name."""
     name = asset.get("AssetName") or asset.get("SubPark") or asset.get("WindFarm")
-    return str(name).strip().replace(" ", "_")
+    return str(name).strip().replace(" ", "_").lower()
 
 
 def asset_print_name(asset):
@@ -129,6 +140,13 @@ def first_day_of_next_month(year, month):
     if month == 12:
         return date(year + 1, 1, 1)
     return date(year, month + 1, 1)
+
+
+def first_day_of_previous_month(today=None):
+    today = today or date.today()
+    if today.month == 1:
+        return date(today.year - 1, 12, 1)
+    return date(today.year, today.month - 1, 1)
 
 
 def generate_month_ranges(start_year, start_month, include_current_month=True):
@@ -170,6 +188,16 @@ def is_current_month(month_start):
     return month_start.year == today.year and month_start.month == today.month
 
 
+def is_previous_month(month_start):
+    prev = first_day_of_previous_month()
+    return month_start.year == prev.year and month_start.month == prev.month
+
+
+def should_refresh_previous_month_today():
+    today = date.today()
+    return REFRESH_PREVIOUS_MONTH and today.day <= PREVIOUS_MONTH_REFRESH_UNTIL_DAY
+
+
 # --------------------------------------------------
 # BLOB HELPERS
 # --------------------------------------------------
@@ -195,8 +223,20 @@ def blob_exists(blob_name):
 
 
 def should_download_month(month_start, blob_name):
+    """
+    Decide whether to download a monthly status-log parquet.
+
+    Rules:
+    - Current month is refreshed if OVERWRITE_CURRENT_MONTH=true.
+    - Previous month is refreshed during the configured post-month validation window.
+    - Older historical months are skipped if the blob already exists.
+    """
     if is_current_month(month_start) and OVERWRITE_CURRENT_MONTH:
         print(f"Current month will be refreshed: {month_start:%Y-%m}")
+        return True
+
+    if is_previous_month(month_start) and should_refresh_previous_month_today():
+        print(f"Previous month will be refreshed for late categorisation updates: {month_start:%Y-%m}")
         return True
 
     if blob_exists(blob_name):
@@ -369,6 +409,8 @@ def main():
     print("Container:", CONTAINER_NAME)
     print("Start:", f"{START_YEAR}-{START_MONTH:02d}")
     print("Overwrite current month:", OVERWRITE_CURRENT_MONTH)
+    print("Refresh previous month:", REFRESH_PREVIOUS_MONTH)
+    print("Previous month refresh until day:", PREVIOUS_MONTH_REFRESH_UNTIL_DAY)
     print("Page size:", PAGE_SIZE)
 
     assets = load_assets()

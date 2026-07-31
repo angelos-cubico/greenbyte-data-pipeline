@@ -9,17 +9,12 @@ Purpose:
 - Use hourly Lost Production signal 6951 as the driving table.
 - For each hourly lost-production timestamp/device, find the active status-log event.
 - Attribute that hour's lost production to the winning event/code/message/category.
-- Save monthly parquet outputs to Azure Blob container: dirtydozen
+- Save monthly parquet outputs to Azure Blob container: dirtydozen.
 
-Why this exists:
-- Status logs are one row per event and are stored by event start month.
-- Long events can start in a previous month and still impact the current month.
-- Signals contain the actual monthly/hourly lost production, so we should not prorate
-  event-level LostProduction unless there is no better signal available.
-
-Output grain:
-- One row per Asset + DeviceID + hourly Time where signal 6951 exists.
-- Enriched with the active/winning event at that hour.
+Important refresh behaviour:
+- Current month is rebuilt every daily run when OVERWRITE_CURRENT_MONTH=true.
+- Previous month is also rebuilt until PREVIOUS_MONTH_REFRESH_UNTIL_DAY when REFRESH_PREVIOUS_MONTH=true.
+- This means late status categorisation updates made by site managers after month end are picked up before the monthly PDF export.
 
 Expected local files:
 - API_key.env
@@ -37,6 +32,8 @@ START_MONTH=1
 PROCESS_ALL_ASSETS=true
 INCLUDE_CURRENT_MONTH=true
 OVERWRITE_CURRENT_MONTH=true
+REFRESH_PREVIOUS_MONTH=true
+PREVIOUS_MONTH_REFRESH_UNTIL_DAY=7
 LOOKBACK_MONTHS=6
 OUTPUT_FOLDER=greenbyte_backfill
 LOST_PRODUCTION_SIGNAL_ID=6951
@@ -45,7 +42,6 @@ SIGNALS_TIMEZONE_MODE=naive
 
 import json
 import os
-import re
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -80,6 +76,8 @@ START_YEAR = int(os.getenv("START_YEAR", "2026"))
 START_MONTH = int(os.getenv("START_MONTH", "1"))
 INCLUDE_CURRENT_MONTH = os.getenv("INCLUDE_CURRENT_MONTH", "true").lower() == "true"
 OVERWRITE_CURRENT_MONTH = os.getenv("OVERWRITE_CURRENT_MONTH", "true").lower() == "true"
+REFRESH_PREVIOUS_MONTH = os.getenv("REFRESH_PREVIOUS_MONTH", "true").lower() == "true"
+PREVIOUS_MONTH_REFRESH_UNTIL_DAY = int(os.getenv("PREVIOUS_MONTH_REFRESH_UNTIL_DAY", "7"))
 PROCESS_ALL_ASSETS = os.getenv("PROCESS_ALL_ASSETS", "true").lower() == "true"
 LOOKBACK_MONTHS = int(os.getenv("LOOKBACK_MONTHS", "6"))
 
@@ -135,6 +133,13 @@ def first_day_of_next_month(year, month):
     return date(year, month + 1, 1)
 
 
+def first_day_of_previous_month(today=None):
+    today = today or date.today()
+    if today.month == 1:
+        return date(today.year - 1, 12, 1)
+    return date(today.year, today.month - 1, 1)
+
+
 def add_months(d, months):
     y = d.year + ((d.month - 1 + months) // 12)
     m = ((d.month - 1 + months) % 12) + 1
@@ -174,6 +179,16 @@ def is_current_month(month_start):
     return month_start.year == today.year and month_start.month == today.month
 
 
+def is_previous_month(month_start):
+    prev = first_day_of_previous_month()
+    return month_start.year == prev.year and month_start.month == prev.month
+
+
+def should_refresh_previous_month_today():
+    today = date.today()
+    return REFRESH_PREVIOUS_MONTH and today.day <= PREVIOUS_MONTH_REFRESH_UNTIL_DAY
+
+
 def date_to_ts(d):
     return pd.Timestamp(datetime(d.year, d.month, d.day))
 
@@ -181,15 +196,12 @@ def date_to_ts(d):
 def normalize_timestamp_series(s):
     ts = pd.to_datetime(s, errors="coerce")
 
-    # If timezone-aware, normalize to UTC and remove tz.
     try:
         if getattr(ts.dt, "tz", None) is not None:
             ts = ts.dt.tz_convert("UTC").dt.tz_localize(None)
     except Exception:
         pass
 
-    # Optional hook if later you decide to explicitly localize/convert.
-    # For now we keep timestamps naive because your existing pipeline appears naive/hourly.
     return ts
 
 
@@ -239,17 +251,30 @@ def dirty_file_name(asset, month_start):
 
 def dirty_blob_name(asset, month_start):
     asset_name = asset_folder_name(asset)
+    file_name = dirty_file_name(asset, month_start)
     return (
         f"asset={asset_name}/"
         f"year={month_start.year}/"
         f"month={month_start.month:02d}/"
-        f"{dirty_file_name(asset, month_start)}"
+        f"{file_name}"
     )
 
 
 def should_build_month(month_start, target_blob_name):
+    """
+    Decide whether to rebuild a monthly Dirty Dozen parquet.
+
+    Rules:
+    - Current month is rebuilt if OVERWRITE_CURRENT_MONTH=true.
+    - Previous month is rebuilt during the configured post-month validation window.
+    - Older historical months are skipped if the blob already exists.
+    """
     if is_current_month(month_start) and OVERWRITE_CURRENT_MONTH:
         print(f"Current month will be rebuilt: {month_start:%Y-%m}")
+        return True
+
+    if is_previous_month(month_start) and should_refresh_previous_month_today():
+        print(f"Previous month will be rebuilt for late status categorisation updates: {month_start:%Y-%m}")
         return True
 
     if blob_exists(DIRTYDOZEN_CONTAINER_NAME, target_blob_name):
@@ -405,15 +430,7 @@ def find_first_existing_column(df, candidates):
 def normalize_signals_lp6951(df, asset):
     """
     Converts a potentially wide or long signals dataframe into:
-    Asset, WindFarm, SubPark, DeviceID, Time, LP6951
-
-    Supported common forms:
-    1. Long:
-       DeviceID / deviceId, Time/timestamp, SignalId/signalId, Value/value
-    2. Wide:
-       DeviceID / deviceId, Time/timestamp, column with 6951 in name
-    3. Wide named:
-       LostProduction, Lost Production, LP6951, 6951
+    Asset, WindFarm, SubPark, DeviceID, Time, LP6951.
     """
     if df.empty:
         return pd.DataFrame()
@@ -432,7 +449,6 @@ def normalize_signals_lp6951(df, asset):
     signal_id_col = find_first_existing_column(df, ["SignalID", "SignalId", "signalId", "signalID", "Signal", "signal"])
     value_col = find_first_existing_column(df, ["Value", "value", "SignalValue", "signalValue", "Actual", "actual"])
 
-    # Case 1: long format with signalId/value.
     if signal_id_col and value_col:
         tmp = df.copy()
         tmp[signal_id_col] = tmp[signal_id_col].astype(str)
@@ -446,7 +462,6 @@ def normalize_signals_lp6951(df, asset):
             "LP6951": pd.to_numeric(tmp[value_col], errors="coerce"),
         })
     else:
-        # Case 2/3: wide format.
         lp_candidates = []
         for c in df.columns:
             cl = str(c).lower().replace(" ", "")
@@ -497,7 +512,7 @@ def assign_events_to_hourly_lp(signals_df, status_df, month_start, month_end):
     Event overlaps hour if:
       TimestampStart < HourEnd AND EventEndForOverlap > HourStart
 
-    If multiple events overlap the same device/hour:
+    If multiple events overlap same device/hour:
       1. Lowest Priority wins.
       2. stop > curtailment > warning.
       3. Longest overlap inside the hour wins.
@@ -507,20 +522,18 @@ def assign_events_to_hourly_lp(signals_df, status_df, month_start, month_end):
 
     month_start_ts = date_to_ts(month_start)
     month_end_ts = date_to_ts(month_end)
-    now_ts = pd.Timestamp.utcnow().tz_localize(None)
+    now_ts = pd.Timestamp.now("UTC").tz_localize(None)
 
     sig = signals_df.copy()
     sig["HourStart"] = sig["Time"]
     sig["HourEnd"] = sig["Time"] + pd.Timedelta(hours=1)
 
-    # Keep only target month signal rows.
     sig = sig[(sig["HourStart"] >= month_start_ts) & (sig["HourStart"] < month_end_ts)].copy()
 
     if sig.empty:
         return pd.DataFrame()
 
     if status_df.empty:
-        # Still return LP rows, but without event attribution.
         out = sig.copy()
         for c in ["Code", "Message", "Comment", "Category", "CategoryGlobalContract"]:
             out[c] = pd.NA
@@ -537,7 +550,6 @@ def assign_events_to_hourly_lp(signals_df, status_df, month_start, month_end):
     events["IsOngoingEvent"] = events["TimestampEnd"].isna()
     events.loc[events["IsOngoingEvent"], "EventEndForOverlap"] = now_ts
 
-    # Pre-filter events that can overlap the month.
     events = events[
         (events["TimestampStart"] < month_end_ts)
         & (events["EventEndForOverlap"] > month_start_ts)
@@ -558,7 +570,6 @@ def assign_events_to_hourly_lp(signals_df, status_df, month_start, month_end):
 
     outputs = []
 
-    # Process per device for clarity and performance.
     for device_id, sig_dev in sig.groupby("DeviceID", sort=False):
         ev_dev = events[events["DeviceID"] == str(device_id)].copy()
 
@@ -576,8 +587,6 @@ def assign_events_to_hourly_lp(signals_df, status_df, month_start, month_end):
             outputs.append(tmp)
             continue
 
-        # Cross join signal hours for this device to possibly overlapping events for this device.
-        # Volumes should be manageable monthly: ~744 hrs per turbine x event count.
         a = sig_dev.reset_index(drop=True).copy()
         b = ev_dev.reset_index(drop=True).copy()
         a["_key"] = 1
@@ -615,12 +624,10 @@ def assign_events_to_hourly_lp(signals_df, status_df, month_start, month_end):
         )
 
         winners = joined.drop_duplicates(subset=["DeviceID", "Time"], keep="first").copy()
-
         winners["EventStartExact"] = winners["TimestampStart"]
         winners["EventEndExact"] = winners["TimestampEnd"]
         winners["HasMatchedEvent"] = True
 
-        # Make sure every signal row returns, even where no event matched.
         base_keys = sig_dev[["DeviceID", "Time"]].copy()
         winners_keys = winners[["DeviceID", "Time"]].copy()
         missing_keys = base_keys.merge(winners_keys, on=["DeviceID", "Time"], how="left", indicator=True)
@@ -656,18 +663,17 @@ def finalize_dirty_columns(df, month_start, month_end):
 
     df["LP6951"] = pd.to_numeric(df["LP6951"], errors="coerce").fillna(0)
 
-    # Useful Power BI labels.
     df["DirtyDozenCause"] = df["Code"].astype("string").fillna("No matched event")
     msg = df["Message"].astype("string").fillna("")
     df.loc[msg != "", "DirtyDozenCause"] = df.loc[msg != "", "DirtyDozenCause"] + " - " + msg[msg != ""]
 
     df["HasLostProduction"] = df["LP6951"].fillna(0) != 0
+    df["DirtyDate"] = pd.to_datetime(df["Time"], errors="coerce").dt.date
 
-    # Rank at row level is not the real visual rank; keep it only for QA.
     df["RowRankByLP"] = df["LP6951"].rank(method="dense", ascending=False).astype(int)
 
     ordered_cols = [
-        "Asset", "WindFarm", "SubPark", "DeviceID", "Time",
+        "Asset", "WindFarm", "SubPark", "DeviceID", "Time", "DirtyDate",
         "LP6951", "HasLostProduction",
         "Code", "Message", "Comment", "Category", "CategoryGlobalContract",
         "Priority", "CategoryPriority",
@@ -724,6 +730,8 @@ def main():
     print("Start:", f"{START_YEAR}-{START_MONTH:02d}")
     print("Lookback months:", LOOKBACK_MONTHS)
     print("Overwrite current month:", OVERWRITE_CURRENT_MONTH)
+    print("Refresh previous month:", REFRESH_PREVIOUS_MONTH)
+    print("Previous month refresh until day:", PREVIOUS_MONTH_REFRESH_UNTIL_DAY)
 
     assets = load_assets()
     month_ranges = generate_month_ranges(START_YEAR, START_MONTH, INCLUDE_CURRENT_MONTH)
