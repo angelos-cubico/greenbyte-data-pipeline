@@ -1,15 +1,17 @@
 """
 Incremental Greenbyte signals downloader - Power BI-ready version.
 
-What this version does:
+Adjusted version:
 1. Reads all assets from assets.json by default.
 2. Checks Azure Blob Storage before downloading each monthly parquet.
 3. Skips historical months that already exist in Blob Storage.
 4. Refreshes the current month because current-month data can still change.
-5. Pulls Greenbyte signal data at hourly resolution.
-6. Converts Greenbyte long-format data into a Power BI-ready wide table.
-7. Saves monthly parquet locally.
-8. Uploads monthly parquet to Azure Blob Storage.
+5. Refreshes the previous month during the reporting validation window.
+6. Pulls Greenbyte signal data at hourly resolution.
+7. Converts Greenbyte timestamps from UTC/company time to Greek site time.
+8. Converts Greenbyte long-format data into a Power BI-ready wide table.
+9. Saves monthly parquet locally.
+10. Uploads monthly parquet to Azure Blob Storage.
 
 Expected local files:
 - API_key.env
@@ -25,7 +27,11 @@ START_YEAR=2026
 START_MONTH=1
 DATA_SIGNAL_IDS=4,248,281,431,6951,9252,1
 PROCESS_ALL_ASSETS=true
+INCLUDE_CURRENT_MONTH=true
 OVERWRITE_CURRENT_MONTH=true
+REFRESH_PREVIOUS_MONTH=true
+PREVIOUS_MONTH_REFRESH_UNTIL_DAY=7
+TARGET_TIMEZONE=Europe/Athens
 OUTPUT_FOLDER=greenbyte_backfill
 DATA_RESOLUTION=hourly
 MAX_RETRIES=3
@@ -92,6 +98,10 @@ START_MONTH = int(os.getenv("START_MONTH", "1"))
 INCLUDE_CURRENT_MONTH = os.getenv("INCLUDE_CURRENT_MONTH", "true").lower() == "true"
 OVERWRITE_CURRENT_MONTH = os.getenv("OVERWRITE_CURRENT_MONTH", "true").lower() == "true"
 
+REFRESH_PREVIOUS_MONTH = os.getenv("REFRESH_PREVIOUS_MONTH", "true").lower() == "true"
+PREVIOUS_MONTH_REFRESH_UNTIL_DAY = int(os.getenv("PREVIOUS_MONTH_REFRESH_UNTIL_DAY", "7"))
+TARGET_TIMEZONE = os.getenv("TARGET_TIMEZONE", "Europe/Athens")
+
 # Default is now true because you asked for all assets.
 PROCESS_ALL_ASSETS = os.getenv("PROCESS_ALL_ASSETS", "true").lower() == "true"
 
@@ -154,24 +164,35 @@ def asset_print_name(asset):
 # --------------------------------------------------
 # DATE HELPERS
 # --------------------------------------------------
+def site_today():
+    return pd.Timestamp.now(tz=TARGET_TIMEZONE).date()
+
+
 def first_day_of_next_month(year, month):
     if month == 12:
         return date(year + 1, 1, 1)
     return date(year, month + 1, 1)
 
 
+def first_day_of_previous_month(today=None):
+    today = today or site_today()
+    if today.month == 1:
+        return date(today.year - 1, 12, 1)
+    return date(today.year, today.month - 1, 1)
+
+
 def generate_month_ranges(start_year, start_month, include_current_month=True):
     """
-    Generate monthly date windows from START_YEAR / START_MONTH up to today.
+    Generate monthly date windows from START_YEAR / START_MONTH up to site-local today.
 
     Historical months:
         timestampEnd = first day of next month
 
     Current month:
-        timestampEnd = today
+        timestampEnd = site-local today
     """
     ranges = []
-    today = date.today()
+    today = site_today()
 
     year = start_year
     month = start_month
@@ -206,8 +227,53 @@ def generate_month_ranges(start_year, start_month, include_current_month=True):
 
 
 def is_current_month(month_start):
-    today = date.today()
+    today = site_today()
     return month_start.year == today.year and month_start.month == today.month
+
+
+def is_previous_month(month_start):
+    previous_month_start = first_day_of_previous_month()
+    return (
+        month_start.year == previous_month_start.year
+        and month_start.month == previous_month_start.month
+    )
+
+
+def should_refresh_previous_month_today():
+    today = site_today()
+    return (
+        REFRESH_PREVIOUS_MONTH
+        and today.day <= PREVIOUS_MONTH_REFRESH_UNTIL_DAY
+    )
+
+
+def site_window_to_utc_strings(start_date, end_date):
+    """
+    Convert site-local month boundaries to UTC strings for Greenbyte API query.
+
+    Example in Greek summer time:
+    2026-07-01 00:00 Athens -> 2026-06-30T21:00:00Z
+    2026-08-01 00:00 Athens -> 2026-07-31T21:00:00Z
+    """
+    start_local = pd.Timestamp(start_date).tz_localize(TARGET_TIMEZONE)
+    end_local = pd.Timestamp(end_date).tz_localize(TARGET_TIMEZONE)
+
+    start_utc = start_local.tz_convert("UTC")
+    end_utc = end_local.tz_convert("UTC")
+
+    return (
+        start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def to_site_time(series):
+    """Convert Greenbyte UTC timestamps to timezone-naive site-local timestamps."""
+    return (
+        pd.to_datetime(series, errors="coerce", utc=True)
+        .dt.tz_convert(TARGET_TIMEZONE)
+        .dt.tz_localize(None)
+    )
 
 
 # --------------------------------------------------
@@ -249,6 +315,10 @@ def should_download_month(month_start, blob_name):
         print(f"Current month will be refreshed: {month_start:%Y-%m}")
         return True
 
+    if is_previous_month(month_start) and should_refresh_previous_month_today():
+        print(f"Previous month will be refreshed: {month_start:%Y-%m}")
+        return True
+
     if blob_exists(blob_name):
         print(f"Already exists in Blob Storage. Skipping: {blob_name}")
         return False
@@ -274,13 +344,14 @@ def upload_file_to_blob(local_file_path, blob_name):
 # --------------------------------------------------
 def download_signals_month(asset, start_date, end_date):
     device_ids = asset.get("DeviceIds")
+    timestamp_start_utc, timestamp_end_utc = site_window_to_utc_strings(start_date, end_date)
 
     params = {
         "deviceIds": device_ids,
         "dataSignalIds": DATA_SIGNAL_IDS,
-        "timestampStart": f"{start_date.isoformat()}T00:00:00Z",
-        "timestampEnd": f"{end_date.isoformat()}T00:00:00Z",
-        "useUtc": "false",
+        "timestampStart": timestamp_start_utc,
+        "timestampEnd": timestamp_end_utc,
+        "useUtc": "true",
         "resolution": DATA_RESOLUTION,
         "aggregate": "device",
         "aggregateLevel": "0",
@@ -291,9 +362,12 @@ def download_signals_month(asset, start_date, end_date):
     print("Downloading signals")
     print("Asset:", asset_print_name(asset))
     print("Device IDs:", device_ids)
-    print("Start:", params["timestampStart"])
-    print("End:  ", params["timestampEnd"])
+    print("Site Start:", start_date)
+    print("Site End:  ", end_date)
+    print("API Start UTC:", params["timestampStart"])
+    print("API End UTC:  ", params["timestampEnd"])
     print("Resolution:", DATA_RESOLUTION)
+    print("Target timezone:", TARGET_TIMEZONE)
 
     last_error = None
 
@@ -332,7 +406,7 @@ def download_signals_month(asset, start_date, end_date):
 # --------------------------------------------------
 # CONVERT GREENBYTE JSON TO LONG TABLE
 # --------------------------------------------------
-def signals_json_to_dataframe(data, asset):
+def signals_json_to_dataframe(data, asset, month_start=None, month_end=None):
     rows = []
 
     asset_name = asset_folder_name(asset)
@@ -388,12 +462,19 @@ def signals_json_to_dataframe(data, asset):
     df = pd.DataFrame(rows)
 
     if not df.empty:
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+        df["Timestamp"] = to_site_time(df["Timestamp"])
+
+        if month_start is not None and month_end is not None:
+            site_start = pd.Timestamp(month_start)
+            site_end = pd.Timestamp(month_end)
+            df = df[(df["Timestamp"] >= site_start) & (df["Timestamp"] < site_end)].copy()
+
         df["Date"] = df["Timestamp"].dt.date
         df["Year"] = df["Timestamp"].dt.year
         df["Month"] = df["Timestamp"].dt.month
         df["Day"] = df["Timestamp"].dt.day
         df["Hour"] = df["Timestamp"].dt.hour
+        df["TargetTimezone"] = TARGET_TIMEZONE
 
     return df
 
@@ -468,6 +549,7 @@ def pivot_signals_for_powerbi(df):
         "Month",
         "Day",
         "Hour",
+        "TargetTimezone",
     ]
 
     pivot_df = df.pivot_table(
@@ -549,8 +631,11 @@ def main():
     print("Container:", CONTAINER_NAME)
     print("Signal IDs:", DATA_SIGNAL_IDS)
     print("Resolution:", DATA_RESOLUTION)
+    print("Target timezone:", TARGET_TIMEZONE)
     print("Start:", f"{START_YEAR}-{START_MONTH:02d}")
     print("Overwrite current month:", OVERWRITE_CURRENT_MONTH)
+    print("Refresh previous month:", REFRESH_PREVIOUS_MONTH)
+    print("Previous month refresh until day:", PREVIOUS_MONTH_REFRESH_UNTIL_DAY)
     print("Process all assets:", PROCESS_ALL_ASSETS)
 
     assets = load_assets()
@@ -578,7 +663,7 @@ def main():
                     continue
 
                 data = download_signals_month(asset, start_date, end_date)
-                long_df = signals_json_to_dataframe(data, asset)
+                long_df = signals_json_to_dataframe(data, asset, start_date, end_date)
 
                 if long_df.empty:
                     print(
