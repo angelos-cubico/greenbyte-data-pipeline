@@ -70,7 +70,8 @@ STATUSLOGS_CONTAINER_NAME = os.getenv("STATUSLOGS_CONTAINER_NAME", "statuslogs")
 SIGNALS_CONTAINER_NAME = os.getenv("SIGNALS_CONTAINER_NAME", "signals")
 DIRTYDOZEN_CONTAINER_NAME = os.getenv("DIRTYDOZEN_CONTAINER_NAME", "dirtydozen")
 
-OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "greenbyte_backfill")
+DEFAULT_OUTPUT_FOLDER = "/tmp/greenbyte_backfill" if os.getenv("FUNCTIONS_WORKER_RUNTIME") else "greenbyte_backfill"
+OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", DEFAULT_OUTPUT_FOLDER)
 
 START_YEAR = int(os.getenv("START_YEAR", "2026"))
 START_MONTH = int(os.getenv("START_MONTH", "1"))
@@ -791,7 +792,8 @@ def main():
                 print("Asset:", asset_print_name(asset))
                 print("Month:", month_start.strftime("%Y-%m"))
                 print("Details:", e)
-                print("Continuing with next month...")
+                print("Stopping this pipeline so Azure records the invocation as failed.")
+                raise
 
     print()
     print("DONE. DirtyDozen files created and uploaded.")

@@ -88,7 +88,8 @@ if not AZURE_STORAGE_CONNECTION_STRING:
 blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
 
 CONTAINER_NAME = os.getenv("STATUSLOGS_CONTAINER_NAME", "statuslogs")
-OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "greenbyte_backfill")
+DEFAULT_OUTPUT_FOLDER = "/tmp/greenbyte_backfill" if os.getenv("FUNCTIONS_WORKER_RUNTIME") else "greenbyte_backfill"
+OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", DEFAULT_OUTPUT_FOLDER)
 
 URL = "https://cubico.greenbyte.cloud/api/2/status"
 HEADERS = {
@@ -510,7 +511,8 @@ def main():
                 print("Asset:", asset_print_name(asset))
                 print("Month:", start_date.strftime("%Y-%m"))
                 print("Details:", e)
-                print("Continuing with next month...")
+                print("Stopping this pipeline so Azure records the invocation as failed.")
+                raise
 
     print()
     print("DONE. Incremental Greenbyte status log files created and uploaded.")

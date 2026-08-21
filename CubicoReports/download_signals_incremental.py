@@ -93,7 +93,8 @@ blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION
 
 CONTAINER_NAME = os.getenv("SIGNALS_CONTAINER_NAME", "signals")
 MONTHLY_KPIS_CONTAINER_NAME = os.getenv("MONTHLY_KPIS_CONTAINER_NAME", "monthly-kpis")
-OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "greenbyte_backfill")
+DEFAULT_OUTPUT_FOLDER = "/tmp/greenbyte_backfill" if os.getenv("FUNCTIONS_WORKER_RUNTIME") else "greenbyte_backfill"
+OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", DEFAULT_OUTPUT_FOLDER)
 
 URL = "https://cubico.greenbyte.cloud/api/2/data"
 
@@ -930,7 +931,8 @@ def main():
                 print("Asset:", asset_print_name(asset))
                 print("Month:", start_date.strftime("%Y-%m"))
                 print("Details:", e)
-                print("Continuing with next month...")
+                print("Stopping this pipeline so Azure records the invocation as failed.")
+                raise
 
     print()
     print("DONE. Incremental hourly signal files and monthly KPI files created and uploaded.")
