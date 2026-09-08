@@ -97,7 +97,7 @@ POWER_CURVE_FILE_CONTAINS = os.getenv("POWER_CURVE_FILE_CONTAINS", "manufacturer
 DATA_RESOLUTION = os.getenv("DATA_RESOLUTION", "hourly")
 OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "appendix_output")
 STATUS_LOOKBACK_MONTHS = int(os.getenv("STATUS_LOOKBACK_MONTHS", "6"))
-PLOT_CACHE_ROOT = Path(os.getenv("PLOT_CACHE_ROOT", str(BASE_DIR / OUTPUT_FOLDER / "_power_curve_plot_cache")))
+PLOT_CACHE_ROOT = Path(os.getenv("PLOT_CACHE_ROOT", str(Path(tempfile.gettempdir()) / "cubico_appendices_plot_cache")))
 
 SP_TENANT_ID = os.getenv("SP_TENANT_ID")
 SP_CLIENT_ID = os.getenv("SP_CLIENT_ID")
