@@ -78,7 +78,7 @@ START_MONTH = int(os.getenv("START_MONTH", "1"))
 INCLUDE_CURRENT_MONTH = os.getenv("INCLUDE_CURRENT_MONTH", "true").lower() == "true"
 OVERWRITE_CURRENT_MONTH = os.getenv("OVERWRITE_CURRENT_MONTH", "true").lower() == "true"
 REFRESH_PREVIOUS_MONTH = os.getenv("REFRESH_PREVIOUS_MONTH", "true").lower() == "true"
-PREVIOUS_MONTH_REFRESH_UNTIL_DAY = int(os.getenv("PREVIOUS_MONTH_REFRESH_UNTIL_DAY", "7"))
+PREVIOUS_MONTH_REFRESH_UNTIL_DAY = int(os.getenv("PREVIOUS_MONTH_REFRESH_UNTIL_DAY", "30"))
 PROCESS_ALL_ASSETS = os.getenv("PROCESS_ALL_ASSETS", "true").lower() == "true"
 LOOKBACK_MONTHS = int(os.getenv("LOOKBACK_MONTHS", "6"))
 
@@ -309,6 +309,11 @@ def load_statuslogs_for_month_window(asset, target_month_start):
                 try:
                     df = read_parquet_blob(STATUSLOGS_CONTAINER_NAME, blob_name)
                     if not df.empty:
+                        # Keep the source snapshot month so repeated versions of the
+                        # same long-running event can be reconciled later.
+                        df = df.copy()
+                        df["SourceMonth"] = current.year * 100 + current.month
+                        df["_SourceBlob"] = blob_name
                         dfs.append(df)
                 except Exception as e:
                     print(f"  WARNING: Failed to read status blob {blob_name}: {e}")
@@ -387,6 +392,59 @@ def normalize_statuslogs(df, asset):
     df["CategoryPriority"] = (
         df["Category"].astype(str).str.lower().map(category_priority).fillna(999).astype(int)
     )
+
+    return df
+
+
+def reconcile_status_event_snapshots(df):
+    """
+    Keep the latest monthly snapshot of each Greenbyte status event.
+
+    A long-running event can appear in several monthly status-log files with
+    the same asset, device, code, and exact start timestamp. Older snapshots
+    may still have a blank TimestampEnd even when a newer snapshot contains
+    the final end time. Keeping the newest snapshot prevents an old open copy
+    from being treated as active for the whole reporting month.
+    """
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    event_key = ["Asset", "DeviceID", "Code", "TimestampStart"]
+    required_columns = event_key + ["SourceMonth"]
+    missing_columns = [c for c in required_columns if c not in df.columns]
+    if missing_columns:
+        raise ValueError(
+            "Cannot reconcile status event snapshots. Missing columns: "
+            + ", ".join(missing_columns)
+        )
+
+    df["SourceMonth"] = pd.to_numeric(df["SourceMonth"], errors="coerce")
+    if df["SourceMonth"].isna().any():
+        raise ValueError(
+            "Cannot reconcile status event snapshots because one or more "
+            "SourceMonth values are invalid."
+        )
+
+    rows_before = len(df)
+
+    # Sort oldest to newest, then retain the latest available version of the
+    # same event. Events with a different exact start timestamp remain separate.
+    sort_columns = event_key + ["SourceMonth"]
+    if "_SourceBlob" in df.columns:
+        sort_columns.append("_SourceBlob")
+
+    df = (
+        df.sort_values(sort_columns, ascending=True, na_position="first")
+        .drop_duplicates(subset=event_key, keep="last")
+        .reset_index(drop=True)
+    )
+
+    print("Status snapshot reconciliation:")
+    print("  Rows before:", rows_before)
+    print("  Rows after: ", len(df))
+    print("  Older snapshots removed:", rows_before - len(df))
 
     return df
 
@@ -775,7 +833,10 @@ def main():
 
                 raw_status = load_statuslogs_for_month_window(asset, month_start)
                 status = normalize_statuslogs(raw_status, asset) if not raw_status.empty else pd.DataFrame()
-                print("Status rows loaded:", len(status))
+                print("Status rows loaded before reconciliation:", len(status))
+                if not status.empty:
+                    status = reconcile_status_event_snapshots(status)
+                print("Status rows used after reconciliation:", len(status))
 
                 dirty = assign_events_to_hourly_lp(lp_signals, status, month_start, month_end)
 
